@@ -8,16 +8,22 @@
 #
 
 package CGI::EncryptForm;
-require 5;
 
 use Crypt::HCE_SHA;
 use Storable qw(freeze thaw);
 use Digest::SHA1 qw(sha1);
 
-$VERSION = 1.01;
+use strict;
+use vars qw($VERSION $CHARSET);
+
+$VERSION = 1.02;
+
+# Default character set we use for encoding/decoding encrypted string
+#
+$CHARSET = [qw/AA Aa BA Ba CA Ca DA Da EA Ea AB Ab BB Bb CB Cb DB Db EB Eb AC Ac BC Bc CC Cc DC Dc EC Ec AD Ad BD Bd CD Cd DD Dd ED Ed AE Ae BE Be CE Ce DE De EE Ee AF Af BF Bf CF Cf DF Df EF Ef AG Ag BG Bg CG Cg DG Dg EG Eg AH Ah BH Bh CH Ch DH Dh EH Eh AI Ai BI Bi CI Ci DI Di EI Ei AJ Aj BJ Bj CJ Cj DJ Dj EJ Ej AK Ak BK Bk CK Ck DK Dk EK Ek AL Al BL Bl CL Cl DL Dl EL El AM Am BM Bm CM Cm DM Dm EM Em AN An BN Bn CN Cn DN Dn EN En AO Ao BO Bo CO Co DO Do EO Eo AP Ap BP Bp CP Cp DP Dp EP Ep AQ Aq BQ Bq CQ Cq DQ Dq EQ Eq AR Ar BR Br CR Cr DR Dr ER Er AS As BS Bs CS Cs DS Ds ES Es AT At BT Bt CT Ct DT Dt ET Et AU Au BU Bu CU Cu DU Du EU Eu AV Av BV Bv CV Cv DV Dv EV Ev AW Aw BW Bw CW Cw DW Dw EW Ew AX Ax BX Bx CX Cx DX Dx EX Ex AY Ay BY By CY Cy DY Dy EY Ey yY wW vV uU zU zZ/];
 
 sub new {
-	my $this = shift;
+	my($this) = shift;
 	my $class = ref($this) || $this;
 	my $self = {};
 	bless $self, $class;
@@ -45,27 +51,31 @@ sub DESTROY {
 #   Encrypt hash reference and return encrypted string
 #
 sub encrypt {
-	my $self = shift;
-  my $decrypted_hashref = shift;
+	my($self, $decrypted_hashref) = @_;
 
-	if (! defined($decrypted_hashref)) {
+	my $secret_key = $self->secret_key() || return undef;
+
+	if (!defined($decrypted_hashref) && !defined($self->{_encrypted_string})) {
+		$self->error('encrypt() This is the first time encrypt() has been called and therefore requires an arguement.');
+		return undef;
+	}
+	elsif (!defined($decrypted_hashref)) {
 		return($self->{_encrypted_string});
 	}
 
 	if (ref($decrypted_hashref) ne 'HASH') {
-		$self->error('This method accepts a single hash reference only.');
-		return(-1);
+		$self->error('encrypt() This method accepts a single hash reference only.');
+		return undef;
 	}
 
-	my $secret_key = $self->secret_key() || return(-1);
 	my $random_key = $self->_random_key();
 
 	my $str = freeze($decrypted_hashref);
 	$str = sha1($str) . $str;
 
 	my $cipher = Crypt::HCE_SHA->new($secret_key, $random_key);
-	$self->{_encrypted_string} = $self->autoescape() ?
-		_escape($random_key . $cipher->hce_block_encrypt($str)) : $random_key . $cipher->hce_block_encrypt($str);
+	$self->{_encrypted_string} = $self->usecharset() ?
+		$self->_encode($random_key . $cipher->hce_block_encrypt($str)) : $random_key . $cipher->hce_block_encrypt($str);
 	$self->error('');
 	return($self->{_encrypted_string});
 }
@@ -82,31 +92,40 @@ sub encrypt {
 # Constructs:
 #
 #   decrypt()
-#   Return reference to hash of last decrypted
+#   Return last decrypted reference to hash
 #
 #   decrypt("encrypted string")
 #   Decrypt encrypted string and return reference to hash
 #
 sub decrypt {
-	my $self = shift;
-	my $encrypted_string = shift;
+	my($self, $encrypted_string) = @_;
 
-	if (! defined($encrypted_string)) {
+	my $secret_key = $self->secret_key() || return undef;
+	my $random_key;
+
+	if (!defined($encrypted_string) && !defined($self->{_decrypted_hashref})) {
+		$self->error('decrypt() This is the first time decrypt() has been called and therefore requires an arguement.');
+		return undef;
+	}
+	elsif (!defined($encrypted_string)) {
 		return($self->{_decrypted_hashref});
 	}
 
-	my $secret_key = $self->secret_key() || return(-1);
-	my $random_key;
+	# if using char set ensure string is even number
+	if ($self->usecharset() && (length($encrypted_string) % 2) != 0) {
+		$self->error('decrypt() Character set is inconsistent.');
+		return undef;
+	}
 
-	# unescape the encrypted string
-	my $str = $self->autoescape() ? _unescape($encrypted_string) :
+	# decode the encrypted string
+	my $str = $self->usecharset() ? $self->_decode($encrypted_string) :
 																	$encrypted_string;
 
 	# extract the random key (first 4 bytes)
 	$random_key = substr($str, 0, 4);
 	if (length($random_key) != 4) {
-		$self->error('Encrypted string is inconsistent.');
-		return(-1);
+		$self->error('decrypt() Random key is inconsistent.');
+		return undef;
 	}
 	$str = substr($str, 4);
 
@@ -118,15 +137,15 @@ sub decrypt {
 	# 20 bytes long
 	my $digest = substr($plaintxt, 0, 20);
 	if (length($digest) != 20) {
-		$self->error('Encrypted string is inconsistent.');
-		return(-1);
+		$self->error('decrypt() Digest is inconsistent.');
+		return undef;
 	}
 	$plaintxt = substr($plaintxt, 20);
 
 	# check stored decrypted digest against digest of decrypted string
 	if ($digest ne sha1($plaintxt)) {
-		$self->error('Encrypted string is inconsistent.');
-		return(-1);
+		$self->error('decrypt() Encrypted string is inconsistent.');
+		return undef;
 	}	
 
 	$self->error('');
@@ -150,44 +169,77 @@ sub decrypt {
 #   Set secret key
 #
 sub secret_key {
-	my $self = shift;
-	my $secret_key = shift;
+	my($self, $secret_key) = @_;
 
 	if (defined($secret_key)) {
 		$self->{_secret_key} = $secret_key;
 	}
 	elsif (!defined($self->{_secret_key})) {
-		$self->error('No secret key has been defined.');
-		return(-1);
+		$self->error('secret_key() No secret key has been defined.');
+		return undef;
 	}
 
 	$self->error('');
 	return($self->{_secret_key});
 }
 
-# Public Method:
+# Public Method
 #
-# autoescape()
+# charset()
 #
 # Purpose:
 #
-# Enable/Return automatic URL escape/unescaping of encrypted/decrypted string 
+# Set character set
+#
+# Constructors:
+#
+#		charset([array of 2 character length elements from 0 to 255])
+#		Set character set
+#
+sub charset {
+	my($self, $charset) = @_;
+
+	if ((defined($charset) && ref($charset) ne 'ARRAY') || !defined($charset)) {
+		$self->error('charset() This methods accepts a single array reference.');
+		return undef;
+	}
+	elsif (defined($charset) && $#$charset != 255) {
+		$self->error('charset() The character set is invalid.');
+		return undef;
+	}
+
+	$self->{'_charset'} = $charset;
+	$self->{'_charset_hash'} = {
+		map { $self->{'_charset'}->[$_] => $_; } 0..$#{$self->{'_charset'}}
+	};
+
+	$self->error('');
+}
+
+# Public Method:
+#
+# usecharset()
+#
+# Purpose:
+#
+# Enable/Return character set encoding/decoding of encrypted/decrypted string 
+# suitable for storage in form fields, cookies or URL's
 #
 # Constructs:
 #
-#   autoescape()
-#   Return current autoescape value
+#   usecharset()
+#   Return current usecharset value
 #
-#   autoescape(0 or 1)
-#   Set autoescaping
+#   usecharset(0 or 1)
+#   Set charset encoding/decoding
 #
-sub autoescape {
-	my $self = shift;
-	my $autoescape = shift;
+sub usecharset {
+	my($self, $usecharset) = @_;
 
 	$self->error('');
-	$self->{_autoescape} = $autoescape if defined($autoescape);
-	return($self->{_autoescape} ? 1 : 0);
+	$self->{_usecharset} = $usecharset if defined($usecharset);
+
+	return($self->{_usecharset} ? 1 : 0);
 }
 
 # Public/Private Method:
@@ -204,14 +256,10 @@ sub autoescape {
 #   Return error from last operation
 #
 sub error {
-	my $self = shift;
-	my $errormsg = shift;
+	my($self, $errormsg) = @_;
 
 	if ($errormsg) {
 		$self->{_errormsg} = "Error: $errormsg\n";
-	}
-	elsif (defined($errormsg)) {
-		$self->{_errormsg} = '';
 	}
 	else {
 		return($self->{_errormsg});
@@ -222,59 +270,58 @@ sub error {
 # Private methods - dont call these from your object
 #
 sub _initialize {
-	my $self = shift;
-  my(%opts) = @_;
+	my($self, %opts) = @_;
 
-	$self->{'_key'} = undef;
-	$self->{'_autoescape'} = 1;
+	$self->{'_usecharset'} = 1;
 	$self->{'_encrypted_string'} = undef;
 	$self->{'_decrypted_hashref'} = undef;
+	$self->{'_secret_key'} = undef;
 	$self->{'_random_key'} = undef;
-	$self->{'_errormsg'} = undef;
+	$self->{'_errormsg'} = '';
+	$self->{'_charset'} = undef;
+	$self->{'_charset_hash'} = undef;
+
+	# Set default charset
+	$self->charset($CHARSET);
 
 	foreach (keys(%opts)) {
 		if (! $self->can($_)) {
-			$self->error("$_ is not a valid option.");
-			return(-1);
+			$self->error("_initialize() $_ is not a valid option.");
+			return undef;
 		}
 		$self->$_($opts{$_});
 	}
 }
 
 #
-# Get/Autogenerate the current object's random key
+# Autogenerate the current object's random key every time. i.e. Not Persistent!
 #
 sub _random_key {
-	my $self = shift;
+	my($self) = @_;
 
-	if (! defined $self->{_random_key}) {
-		$self->{_random_key} = pack("CCCC", rand(500), rand(500), rand(500),
-																				rand(500));
-	}
+	$self->{_random_key} = pack("CCCC", rand(255), rand(255), rand(255),
+																			rand(255));
 
 	$self->error('');
 	return($self->{_random_key});
 }
 
-#
-# Borrowed from CGI.pm
+# Decode encrypted string using character set
 # 
-sub _unescape {
-  my $todecode = shift;
-  return undef unless defined($todecode);
-  $todecode =~ tr/+/ /;       # pluses become spaces
-	$todecode =~ s/%([0-9a-fA-F]{2})/pack("c",hex($1))/ge;
-  return $todecode;
+sub _decode {
+	my($self, $decode) = @_;
+
+	$decode =~ s/(.{2})/chr($self->{'_charset_hash'}->{$1})/sge;
+  return($decode);
 }
 
+# Encode encrypted string using character set
 #
-# Borrowed from CGI.pm
-#
-sub _escape {
-  my $toencode = shift;
-  return undef unless defined($toencode);
-  $toencode=~s/([^a-zA-Z0-9_.-])/uc sprintf("%%%02x",ord($1))/eg;
-  return $toencode;
+sub _encode {
+		my($self, $encode) = @_;
+
+  	$encode =~ s/(.)/$self->{'_charset'}->[ord($1)]/sge;
+    return($encode);
 }
 
 1;
@@ -294,16 +341,18 @@ CGI::EncryptForm - Implement trusted stateful CGI Form Data using cryptography.
   my $hashref = { username => 'joe', password => 'test' };
 
   my $encrypted_string = $cfo->encrypt($hashref);
-  if ($encrypted_string == -1) {
+  if (!defined($encrypted_string)) {
     print $cfo->error();
     return;
   }
 
   my $newhashref = $cfo->decrypt($encrypted_string);
-  if ($newhashref == -1) {
+  if (!defined($newhashref)) {
     print $cfo->error();
     return;
   }
+
+  print $newhashref->{'username'};
 
 =head1 PREREQUISITES
 
@@ -363,12 +412,12 @@ verifying all state for each form processed, unnecessary.
 
 =over 4
 
-=item B<new CGI::EncryptForm>([secret_key => $s [, autoescape => $a]])
+=item B<new CGI::EncryptForm>([secret_key => $s [, usecharset => $a]])
 
 Create a new CGI::EncryptForm object. All of the paramaters are optional.
 $s specifies the secret key to use during encryption/decryption. $a
-specifies whether to enable (1) or disable (0) the automatic URL escape/unescape
-of the encrypted/decrypted result. By default this is enabled.
+specifies whether to enable (1) or disable (0) the character set
+encoding/decoding of the encrypted/decrypted result. By default this is enabled.
 
 =item B<encrypt>($hashref)
 
@@ -376,7 +425,7 @@ Encrypt the data structure and return an encrypted string. $hashref must be
 a reference to an associative array supported by the Storable module.
 If called with no arguement, returns the previous encrypted string.
 
-Upon error, the method returns -1 and sets error().
+Upon error, the method returns undef and sets error().
 
 =item B<decrypt>($encrypted_string)
 
@@ -384,29 +433,47 @@ Decrypt the encrypted string and return a reference to an associative array.
 $encrypted_string must be a scalar previously generated by encrypt().
 If called with no arguement, returns the previous reference.
 
-Upon error, the method returns -1 and sets error(). If the encrypted
-string is tampered with the decryption routine should fail with -1, but
+Upon error, the method returns undef and sets error(). If the encrypted
+string is tampered with the decryption routine should fail with undef, but
 this is ultimately dependant on the strength of SHA1 digests.
 
 =item B<secret_key>($secret)
 
 Sets the secret key for use during encryption/decryption. This method is
 analogues to the secret_key paramater when creating a CGI::EncryptForm object.
-If called with no $secret it returns the current secret key or -1 if undefined.
+If called with no $secret it returns the current secret key or undef if
+undefined.
 
-Upon error, the method returns -1 and sets error().
+Upon error, the method returns undef and sets error().
 
-=item B<autoescape>(1)
+=item B<usecharset>(1)
 
-Enables or disables the automatic URL escape/unescape of encrypted/decrypted
-strings. This method is analogues to the autoescape paramater when creating a
-CGI::EncryptForm object. By default autoescape is enabled (1) and should be
-ignored unless you use this module in non CGI programs.
+Enables or disables the character set encoding/decoding of encrypted/decrypted
+strings. This method is analogues to the usecharset paramater when creating a
+CGI::EncryptForm object. By default usecharset is enabled (1) and should be
+ignored unless you use this module in non CGI programs. The encode/decode
+routine applies the default or user defined (B<see charset()>) character set to
+encode/decode the encrypted string, before returning to the caller.
+
+=item B<charset>($arrayref)
+
+Sets the character set which will be used to encode/decode the
+encrypted/decrypted string. This method accepts a single array reference that
+must contain a character set from 0 to 255, where by each element must be 2
+characters and UNIQUE. e.g.
+
+  charset(qw[/aA aB aC aD ... /])
+
+If this method is not called with your own character set, a default
+character set will be used which produces suitable output to store the
+result of the encrypt() method in form fields, URL's and cookies.
+
+Upon error, the method returns undef and sets error().
 
 =item B<error>()
 
 Returns the last error as a scalar. You would normally read this if any
-method returns -1. error() is always cleared for each method that
+method returns undef. error() is always cleared for each method that
 executes successfully.
 
 =back
@@ -420,9 +487,10 @@ CGI.pm to maintain stateful information in a multi-form CGI script.
 
   use CGI::EncryptForm;
   use CGI;
+  use vars qw($cgi $cfo);
 
-  my $cgi = new CGI();
-  my $cfo = new CGI::EncryptForm(secret_key => 'blah');
+  $cgi = new CGI();
+  $cfo = new CGI::EncryptForm(secret_key => 'blah');
 
   print $cgi->header(), $cgi->start_html(), $cgi->start_form();
 
@@ -469,7 +537,7 @@ CGI.pm to maintain stateful information in a multi-form CGI script.
   sub form3 {
 
     my $hashref = $cfo->decrypt($cgi->param('enc'));
-    if ($hashref == -1) {
+    if (!defined($hashref)) {
       print $cfo->error();
       return;
     }
@@ -481,6 +549,13 @@ CGI.pm to maintain stateful information in a multi-form CGI script.
           "field in form2, to see if you can alter the result of the ",
           "data as it originally flows from form 1 to form 3. Good luck";
   }
+
+=head1 NOTES
+
+CGI::EncryptForm is not limited to form fields. The encrypted result can be
+stored in cookies and URL's as well. Personally though, I discourage this
+because your more likely to exceed size limitations with various web browsers
+and servers.
 
 =head1 BUGS
 
@@ -499,8 +574,8 @@ and/or modify it under the same terms as Perl itself.
 
 Bug reports and comments to maral@phase-one.com.au.
 
-Thanks to the authors of these fine perl modules Storable, Digest::SHA1,
-Crypt::HCE_SHA and CGI.
+Thanks to the authors of these fine perl modules Storable, Digest::SHA1
+and Crypt::HCE_SHA.
 
 =head1 SEE ALSO
 
