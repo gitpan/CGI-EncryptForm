@@ -11,11 +11,10 @@ package CGI::EncryptForm;
 require 5;
 
 use Crypt::HCE_SHA;
-use Math::TrulyRandom qw(truly_random_value);
 use Storable qw(freeze thaw);
 use Digest::SHA1 qw(sha1);
 
-$VERSION = 1.00;
+$VERSION = 1.01;
 
 sub new {
 	my $this = shift;
@@ -62,11 +61,11 @@ sub encrypt {
 	my $random_key = $self->_random_key();
 
 	my $str = freeze($decrypted_hashref);
-	$str = join('', sha1($str), $str);
+	$str = sha1($str) . $str;
 
 	my $cipher = Crypt::HCE_SHA->new($secret_key, $random_key);
 	$self->{_encrypted_string} = $self->autoescape() ?
-		_escape(join(',', $random_key, $cipher->hce_block_encrypt($str))) : join(',', $random_key, $cipher->hce_block_encrypt($str));
+		_escape($random_key . $cipher->hce_block_encrypt($str)) : $random_key . $cipher->hce_block_encrypt($str);
 	$self->error('');
 	return($self->{_encrypted_string});
 }
@@ -103,15 +102,13 @@ sub decrypt {
 	my $str = $self->autoescape() ? _unescape($encrypted_string) :
 																	$encrypted_string;
 
-	# extract the random key
-	if ($str =~ /^([\d-]+),/) {
-		$random_key = $1;
-		$str =~ s/^[\d+-]+,//;
-	}
-	else {
+	# extract the random key (first 4 bytes)
+	$random_key = substr($str, 0, 4);
+	if (length($random_key) != 4) {
 		$self->error('Encrypted string is inconsistent.');
 		return(-1);
 	}
+	$str = substr($str, 4);
 
   # decrypt
   my $cipher = Crypt::HCE_SHA->new($secret_key, $random_key);
@@ -120,6 +117,10 @@ sub decrypt {
 	# extract sha1 digest from decrypted string which is always
 	# 20 bytes long
 	my $digest = substr($plaintxt, 0, 20);
+	if (length($digest) != 20) {
+		$self->error('Encrypted string is inconsistent.');
+		return(-1);
+	}
 	$plaintxt = substr($plaintxt, 20);
 
 	# check stored decrypted digest against digest of decrypted string
@@ -207,7 +208,7 @@ sub error {
 	my $errormsg = shift;
 
 	if ($errormsg) {
-		$self->{_errormsg} = join('', 'Error: ', $errormsg, "\n");
+		$self->{_errormsg} = "Error: $errormsg\n";
 	}
 	elsif (defined($errormsg)) {
 		$self->{_errormsg} = '';
@@ -247,7 +248,8 @@ sub _random_key {
 	my $self = shift;
 
 	if (! defined $self->{_random_key}) {
-		$self->{_random_key} = truly_random_value();
+		$self->{_random_key} = pack("CCCC", rand(500), rand(500), rand(500),
+																				rand(500));
 	}
 
 	$self->error('');
@@ -307,7 +309,7 @@ CGI::EncryptForm - Implement trusted stateful CGI Form Data using cryptography.
 
 This modules requires the following perl modules:
 
-Math::TrulyRandom, Digest::SHA1, Crypt::HCE_SHA and Storable
+Digest::SHA1, Crypt::HCE_SHA and Storable
 
 =head1 ABSTRACT
 
@@ -486,8 +488,7 @@ None that I know of.
 
 =head1 TODO
 
-Math::TrulyRandom may be replaced with an alternative in the near future, as
-it is expensive in computing terms.
+None.
 
 =head1 AUTHOR
 
@@ -498,11 +499,11 @@ and/or modify it under the same terms as Perl itself.
 
 Bug reports and comments to maral@phase-one.com.au.
 
-Thanks to the authors of these fine perl modules Storable, Math::TrulyRandom,
-Digest::SHA1, Crypt::HCE_SHA and CGI.
+Thanks to the authors of these fine perl modules Storable, Digest::SHA1,
+Crypt::HCE_SHA and CGI.
 
 =head1 SEE ALSO
 
-Storable, Digest::SHA1, Digest::HCE_SHA1, Math::TrulyRandom
+Storable, Digest::SHA1, Digest::HCE_SHA1
 
 =cut

@@ -50,6 +50,7 @@ print "ok 1\n";
         print "ok 6\n";
 		}
     else {
+				print $cfo->error();
 				print "not ok 6\n";
     }    
 		$cfo->secret_key('wrong key');

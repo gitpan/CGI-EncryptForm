@@ -1,5 +1,19 @@
 CGI::EncryptForm - Implement trusted stateful CGI Form Data using cryptography.
 
+CHANGES
+Revision history for CGI::EncryptForm
+
+1.01 1999-10-20
+
+	- Removed dependancy on Math::TrulyRandom because of portability issues.
+    Replaced random number generator with perl's builtin rand(). Given
+    the purpose of this module, I believe rand() will surfice.
+    If you disagree make me understand why and I will look into it further.
+
+1.00 1999-10-18
+
+  -	First Release
+
 AUTHOR
     Copyright 1999, Peter Marelas. All rights reserved.
 
